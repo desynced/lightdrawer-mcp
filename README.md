@@ -8,14 +8,15 @@ LightDrawer itself is the website and Cloudflare Worker at [lightdrawer.org](htt
 
 ## What you can do
 
-1. **stamp** — fingerprint a local file or some text, then give you a browser link so you can finish on LightDrawer. Open the link, drop the same file, complete the site’s human check, and download your receipt. The recommended link uses `#digest=<hash>`, which stays in the URL fragment and is not sent to any server.
-2. **verify** — check a LightDrawer receipt ZIP on your machine, optionally against the original file or text.
-3. **lookup** — ask LightDrawer whether it has a public record for a fingerprint, and get the `https://lightdrawer.org/r/<hash>` page.
+1. **stamp** — fingerprint a local file or some text and timestamp it with LightDrawer. When the open stamp lane is available, this finishes in one step and returns a receipt link. If the lane is off or full, you get a browser link instead: open it, drop the same file, complete the site’s human check, and download your receipt. A byte-for-byte copy of exactly what was hashed is saved on your computer so you can verify later.
+2. **verify** — check a LightDrawer receipt ZIP on your machine, or pass just a hash to look up a saved original. If you do not pass the original file or text, the tool will try to find the saved copy automatically.
+3. **lookup** — ask LightDrawer whether it has a public record for a fingerprint, and get the `https://lightdrawer.org/r/<hash>` page. If a local saved copy exists, the result mentions it.
 
 ## Privacy
 
 - Files and text are hashed locally with SHA-256.
-- Only that 64-character hash is sent to lightdrawer.org (never the file). Lookup sends it to ask about a record. Stamp may POST it to a reserved future path (see below); if that path is not available, you get a browser link instead.
+- Only that 64-character hash is sent to lightdrawer.org (never the file). Stamp POSTs it to the open lane; if that lane is off or full, you get a browser link instead.
+- A copy of the original is saved only on your computer. It is never uploaded.
 - Verify runs entirely on your machine and uploads nothing.
 - This server does not add AI.
 
@@ -103,16 +104,54 @@ From a local checkout (useful before you rely on the GitHub install):
 }
 ```
 
+## Try it
+
+Once the server is added to your client, you can say things like:
+
+- “stamp my notes.md”
+- “verify this receipt”
+- “look up this file”
+
+### Koru use cases
+
+Koru is a good fit for two everyday habits:
+
+- **Prove an idea or draft existed on a date.** Stamp a note when you first write it down. Later you can show that that exact text was already there.
+- **Stamp named versions.** When a draft becomes v1, then v2, then final, stamp each saved file. Each version has its own fingerprint and its own saved copy.
+
 ## How stamp works
 
 Stamp fingerprints your file or text on this machine. The file itself is never uploaded.
 
-It then gives you a browser link so you can finish on LightDrawer:
+When LightDrawer’s open stamp lane is available, the stamp finishes there and you get a receipt link (`https://lightdrawer.org/r/<hash>`). That lane allows about 20 stamps per hour from one address, and about 500 stamps a day in total. Those caps protect the free public calendars and timestamp services LightDrawer uses.
 
-- Recommended: `https://lightdrawer.org/#digest=<hash>` — the hash stays in the URL fragment, so it is not sent to any server.
-- Also provided: `https://lightdrawer.org/?expect=<hash>` — same idea, but the hash is in the query string.
+If the lane is switched off or is over its limit, the tool gives you a browser link instead so you can still finish:
 
-Open the link, drop the same file (or a file that contains the exact UTF-8 text), complete the check, and download your receipt.
+1. Open the link it gives you. The recommended one uses `#digest=<hash>`, which stays in the browser and is not sent to any server.
+2. Drop the same file (or a file that contains the exact UTF-8 text).
+3. Complete the short human check on the site.
+4. Download your receipt.
+
+A second link with `?expect=<hash>` is also provided; that hash is in the query string.
+
+## Why a local copy is saved
+
+Editing a note later changes its fingerprint. Stamping the edited note is a new stamp — it does not prove the old one. The only way to check an earlier stamp is to still have the exact bytes that were hashed.
+
+So each stamp saves a byte-for-byte copy of exactly what was hashed, locally only:
+
+- Default folder: `~/.lightdrawer/stamps/<hash>/` (that home folder works on every OS).
+- Inside: the original (keeping the file’s own name, or `text.txt` for text), a small `stamp.json` (hash, time, source, original path, how it was stamped, and the receipt link), and the receipt once there is one.
+- Change the folder with `LIGHTDRAWER_STAMPS_DIR`.
+- Turn saving off with `LIGHTDRAWER_SAVE_ORIGINALS=0`.
+
+There is no size cap, because a partial copy cannot be verified later. The saved copy is the same size as the original, so keep an eye on disk space.
+
+Copies never leave your computer. LightDrawer does not see them. Back up `~/.lightdrawer/stamps` (or your custom folder) if you care about those files — this tool does not upload them anywhere.
+
+If you finished a stamp in the browser, the receipt you download there cannot be linked automatically. The tool will tell you where the saved original is; keep that receipt with it. When you later verify, pass the receipt, or pass the hash, and the tool will look for the saved original.
+
+Website-made receipts stamp `statement.json` (the file hash plus optional notes), not the file hash alone. Their public `/r/` fingerprint is therefore different. Verify maps those hashes when it can, and says so honestly when a lookup used the statement fingerprint instead of the file’s own hash.
 
 ## What verify checks
 
@@ -147,11 +186,11 @@ npm run test:smoke  # speak MCP over stdio; live lookup of the example receipt
 
 The smoke test looks up the public example receipt at
 `https://lightdrawer.org/r/d83f8a256bfc0c6817290c2af8d63c86370147e2f4e7f6cb7009d6fb7a7f97ad`
-and does a keyless stamp of some text. That stamp POSTs only the hash to the reserved path below (which 404s today), then returns the browser hand-off.
+and does a keyless stamp of some text. That stamp POSTs only the hash to `/api/mcp/stamp`. If the open lane is not available, the tool returns the browser hand-off.
 
-Stamp first POSTs only the hash to `/api/mcp/stamp`. That path is reserved for a future open, rate-limited stamp lane on lightdrawer.org. Today it is not implemented (it 404s), and the tool then falls back to the browser hand-off. When the lane ships, existing installs need no config change. The request body matches `POST /api/stamp`: `{ "digest": "<64-hex>", "tsq": "..." }`.
+Stamp first POSTs only the hash to `/api/mcp/stamp`. The request body matches `POST /api/stamp`: `{ "digest": "<64-hex>", "tsq": "..." }`. If that lane is off, full, or unreachable, the tool falls back to the browser hand-off. Existing installs need no config change when the lane is turned on.
 
-If LightDrawer has issued you a personal key, set LIGHTDRAWER_STAMP_KEY.
+If LightDrawer has issued you a personal key, set `LIGHTDRAWER_STAMP_KEY` (this is optional and not required for the open lane).
 
 `LIGHTDRAWER_URL` points at a self-hosted LightDrawer instead of `https://lightdrawer.org`.
 

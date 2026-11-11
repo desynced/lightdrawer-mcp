@@ -10,6 +10,7 @@ const SELFTEST_STATEMENT_HASH = 'd83f8a256bfc0c6817290c2af8d63c86370147e2f4e7f6c
 function startServer() {
   const env = { ...process.env };
   delete env.LIGHTDRAWER_STAMP_KEY;
+  env.LIGHTDRAWER_STAMPS_DIR = env.LIGHTDRAWER_STAMPS_DIR || '/tmp/ld-mcp-smoke-stamps';
   const child = spawn(process.execPath, [join(root, 'src', 'index.js')], {
     cwd: root,
     env,

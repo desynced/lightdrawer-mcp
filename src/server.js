@@ -46,7 +46,8 @@ export function createServer() {
       title: 'Verify a LightDrawer receipt',
       description: VERIFY_DESCRIPTION,
       inputSchema: {
-        receipt: z.string().describe('Local path to a LightDrawer receipt ZIP, or to a folder that contains statement.json.'),
+        receipt: z.string().optional().describe('Local path to a LightDrawer receipt ZIP, or to a folder that contains statement.json.'),
+        hash: z.string().optional().describe('SHA-256 hex of a stamped file or text. Looks for a locally saved original, and a saved receipt if one is in that folder.'),
         file: z.string().optional().describe('Optional local path of the original file, to check that it matches the receipt.'),
         text: z.string().optional().describe('Optional original text (UTF-8), to check that it matches the receipt.'),
       },

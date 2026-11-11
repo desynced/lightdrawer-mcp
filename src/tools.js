@@ -2,6 +2,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MCP_STAMP_PATH, MCP_STAMP_TIMEOUT_MS, origin, getStampKey, stampKeyConfigured, VERSION } from './config.js';
 import { normalizeHash, readFileBytes, sha256Bytes, sha256File, sha256Text, utf8Bytes } from './hash.js';
+import { findSavedStamp, saveOriginal, saveReceiptCopy, saveStampMeta } from './store.js';
 import { loadVerifier } from './verifier.js';
 
 const FETCH_TIMEOUT_MS = 20000;
@@ -79,21 +80,25 @@ export async function hashFileOrText({ file, text }) {
 
 export const STAMP_DESCRIPTION = `Hash a file or some text locally (SHA-256) and timestamp that fingerprint with LightDrawer. The file or text never leaves this machine — only the 64-character hash is used.
 
-This tool returns a browser link so you can finish stamping on LightDrawer: open the link, drop the same file, complete the human check, and download the receipt. The recommended link uses #digest=<hash>, which stays in the URL fragment and is not sent to any server.
+When LightDrawer's open stamp lane is available, this completes the stamp and returns a receipt link. The lane is limited per address per hour and has a daily total; if it is off or over its limit, this tool gives you a browser link instead: open it, drop the same file, complete the human check, and download the receipt. The recommended fallback link uses #digest=<hash>, which stays in the URL fragment and is not sent to any server.
+
+A byte-for-byte copy of exactly what was hashed is saved locally (unless you turn that off) so you can verify later. Editing the file afterwards changes its fingerprint, and restamping does not prove the old stamp.
 
 Provide exactly one of "file" (a local path) or "text".`;
 
-export const VERIFY_DESCRIPTION = `Verify a LightDrawer receipt ZIP (or an extracted receipt folder) on this machine using LightDrawer's offline verifier. Optionally pass the original "file" or "text" to check that it matches the receipt.
+export const VERIFY_DESCRIPTION = `Verify a LightDrawer receipt ZIP (or an extracted receipt folder) on this machine using LightDrawer's offline verifier. You can pass a "receipt" path, or just a "hash" to look in the local saved-originals folder. If you do not pass the original file or text, this tool will try to find the saved copy automatically and will say whether it was found and matches.
 
-This checks: the statement is well-formed; the original file or text hash matches if supplied; the OpenTimestamps proof (offline: digest and structure, including any claimed Bitcoin block); the RFC 3161 FreeTSA token (signature and pinned root); the Certificate Transparency proof, including Let's Encrypt precertificate SCTs against bundled log keys; and a Rekor entry if the receipt has one.
+This checks: the statement is well-formed; the original file or text hash matches if supplied or found; the OpenTimestamps proof (offline: digest and structure, including any claimed Bitcoin block); the RFC 3161 FreeTSA token (signature and pinned root); the Certificate Transparency proof, including Let's Encrypt precertificate SCTs against bundled log keys; and a Rekor entry if the receipt has one.
 
 This does not: upload anything; look up Bitcoin blocks online; upgrade pending proofs; check FreeTSA revocation lists; or validate C2PA Content Credentials (they are read only).
 
-Provide "receipt" (a path). Optionally provide "file" or "text", but not both.`;
+Receipts made on the LightDrawer website stamp statement.json, not the file itself, so their public fingerprint is different from the file hash where a saved original is stored.
+
+Provide "receipt" or "hash". Optionally provide "file" or "text", but not both.`;
 
 export const LOOKUP_DESCRIPTION = `Look up whether LightDrawer has a public record for a SHA-256 fingerprint. Uses the public lookup API and also returns the page https://lightdrawer.org/r/<hash>.
 
-For receipts made on the LightDrawer website, the fingerprint in /r/<hash> is the SHA-256 of statement.json inside the receipt, not the original file's hash. Pass "receipt" to read that fingerprint from a receipt ZIP, or pass "hash" if you already have it.
+For receipts made on the LightDrawer website, the fingerprint in /r/<hash> is the SHA-256 of statement.json inside the receipt, not the original file's hash. Pass "receipt" to read that fingerprint from a receipt ZIP, or pass "hash" if you already have it. If a local saved copy of the original exists for that hash, the result mentions it.
 
 If you pass "file" or "text", this tool hashes it locally and looks up that hash. That finds stamps of the file or text itself (for example a hash that was stamped directly). It will not find a website-made receipt unless you pass the statement.json hash or the receipt file.
 
@@ -113,10 +118,24 @@ function buildStampBody(hash) {
   return body;
 }
 
-function handoffResult(hashed) {
+function handoffResult(hashed, extra = {}) {
+  const instructions = [
+    'Only the SHA-256 fingerprint was computed here. The file or text never left this machine.',
+    'Open the fragment_url. The hash after #digest= stays in the browser and is not sent to any server.',
+    hashed.source === 'text'
+      ? 'Save the exact same text (UTF-8) to a file and drop that file on LightDrawer so the fingerprint matches.'
+      : 'Drop the same file on LightDrawer to confirm it.',
+    'Complete the human check on the site and download your receipt.',
+  ];
+  if (extra.busy) {
+    instructions.push("LightDrawer's open stamp lane is temporarily full. You can finish in your browser now, or try the tool again later.");
+  } else if (extra.unavailable) {
+    instructions.push("LightDrawer's open stamp lane is temporarily unavailable. You can finish in your browser now, or try the tool again later.");
+  }
   return {
     ok: true,
     mode: 'browser_handoff',
+    stamped_via: 'browser_handoff',
     hash: hashed.hash,
     source: hashed.source,
     file: hashed.file || null,
@@ -125,22 +144,16 @@ function handoffResult(hashed) {
       fragment_url: fragmentHandoffUrl(hashed.hash),
       expect_url: expectHandoffUrl(hashed.hash),
     },
-    instructions: [
-      'Only the SHA-256 fingerprint was computed here. The file or text never left this machine.',
-      'Open the fragment_url. The hash after #digest= stays in the browser and is not sent to any server.',
-      hashed.source === 'text'
-        ? 'Save the exact same text (UTF-8) to a file and drop that file on LightDrawer so the fingerprint matches.'
-        : 'Drop the same file on LightDrawer to confirm it.',
-      'Complete the human check on the site and download your receipt.',
-    ],
+    instructions,
   };
 }
 
-function stampSuccess(hashed, res) {
+function stampSuccess(hashed, res, stampedVia) {
   const ots = res.body.ots && typeof res.body.ots === 'object' ? res.body.ots : {};
   return {
     ok: true,
     mode: 'api',
+    stamped_via: stampedVia,
     hash: hashed.hash,
     source: hashed.source,
     file: hashed.file || null,
@@ -156,7 +169,7 @@ function stampSuccess(hashed, res) {
   };
 }
 
-function interpretStampResponse(hashed, res) {
+function interpretStampResponse(hashed, res, stampedVia) {
   if (res.status === 401) {
     return fail('LightDrawer rejected the stamp key (invalid or revoked).', { hash: hashed.hash, status: 401 });
   }
@@ -170,11 +183,70 @@ function interpretStampResponse(hashed, res) {
     const message = typeof res.body.error === 'string' ? res.body.error : 'LightDrawer could not stamp this hash.';
     return fail(message, { hash: hashed.hash, status: res.status });
   }
-  return stampSuccess(hashed, res);
+  return stampSuccess(hashed, res, stampedVia);
 }
 
-// Statuses that mean the reserved open lane is not available yet.
-const MCP_STAMP_UNAVAILABLE = new Set([403, 404, 405]);
+const MCP_STAMP_FALLBACK = new Set([403, 404, 405, 429, 503]);
+
+async function attachSavedOriginal(result, hashed, args) {
+  if (!result || !hashed) return result;
+  try {
+    const saved = await saveOriginal({
+      hash: hashed.hash,
+      source: hashed.source,
+      file: hashed.file,
+      text: args && args.text,
+    });
+    if (saved && saved.saved) {
+      await saveStampMeta({
+        hash: hashed.hash,
+        source: hashed.source,
+        file: hashed.file,
+        stampedVia: result.stamped_via || (result.mode === 'browser_handoff' ? 'browser_handoff' : null),
+        receiptUrl: result.receipt_url || null,
+        handoff: result.handoff || null,
+      });
+      result.saved_original = {
+        saved: true,
+        reused: !!saved.reused,
+        path: saved.path,
+        directory: saved.directory,
+        name: saved.name,
+      };
+      const where = `A byte-for-byte copy of exactly what was hashed was saved at ${saved.path}.`;
+      if (result.mode === 'browser_handoff') {
+        result.instructions = [...(result.instructions || []), `${where} The receipt you download in the browser cannot be linked automatically — keep that receipt with this saved copy if you want to verify later.`];
+      } else if (Array.isArray(result.notes)) {
+        result.notes = [...result.notes, where];
+      } else {
+        result.notes = [where];
+      }
+    } else {
+      result.saved_original = {
+        saved: false,
+        skipped: saved && saved.skipped ? saved.skipped : 'disabled',
+      };
+    }
+  } catch (err) {
+    result.saved_original = {
+      saved: false,
+      error: 'Could not save a local copy of the original.',
+      detail: String(err && err.message ? err.message : err),
+    };
+  }
+  return result;
+}
+
+function savedOriginalInfo(saved) {
+  if (!saved || !saved.original_path) return { found: false };
+  return {
+    found: true,
+    path: saved.original_path,
+    directory: saved.directory,
+    name: saved.original_name || null,
+    matches: saved.matches,
+  };
+}
 
 export async function stamp(args = {}, { fetchImpl = fetchJson } = {}) {
   const keys = picked(args, ['file', 'text']);
@@ -205,15 +277,14 @@ export async function stamp(args = {}, { fetchImpl = fetchJson } = {}) {
         detail: err && err.name === 'AbortError' ? 'The request timed out.' : 'Network error.',
       });
     }
-    return interpretStampResponse(hashed, res);
+    return attachSavedOriginal(interpretStampResponse(hashed, res, 'key'), hashed, args);
   }
 
-  // Keyless default: try the reserved future open lane first so that
-  // lane can ship later with zero config change. POST only the hash
+  // Keyless default: try the open lane first. POST only the hash
   // (same body as /api/stamp: { digest, tsq? }), never file bytes,
-  // and never an Authorization header. Today /api/mcp/stamp 404s;
-  // 404, 405, 403, or a network error fall back silently to the
-  // browser hand-off (#digest=).
+  // and never an Authorization header. If the lane is off (404),
+  // forbidden (403), not implemented (405), busy (429), unavailable
+  // (503), or unreachable, fall back to the browser hand-off (#digest=).
   let res;
   try {
     res = await fetchImpl(`${origin()}${MCP_STAMP_PATH}`, {
@@ -223,10 +294,13 @@ export async function stamp(args = {}, { fetchImpl = fetchJson } = {}) {
       timeoutMs: MCP_STAMP_TIMEOUT_MS,
     });
   } catch {
-    return handoffResult(hashed);
+    return attachSavedOriginal(handoffResult(hashed), hashed, args);
   }
-  if (MCP_STAMP_UNAVAILABLE.has(res.status)) return handoffResult(hashed);
-  return interpretStampResponse(hashed, res);
+  if (MCP_STAMP_FALLBACK.has(res.status)) {
+    const extra = res.status === 429 ? { busy: true } : res.status === 503 ? { unavailable: true } : {};
+    return attachSavedOriginal(handoffResult(hashed, extra), hashed, args);
+  }
+  return attachSavedOriginal(interpretStampResponse(hashed, res, 'open_lane'), hashed, args);
 }
 
 async function readReceiptFiles(receiptPath, verifier) {
@@ -284,9 +358,47 @@ const VERIFY_LIMITS = [
 ];
 
 export async function verify(args = {}) {
-  if (!nonempty(args.receipt)) return fail('Provide a receipt path (a .zip file or an extracted receipt folder).');
   const extras = picked(args, ['file', 'text']);
   if (extras.length > 1) return fail('Provide a file or text to check against the receipt, not both.');
+  const hasReceipt = nonempty(args.receipt);
+  const hasHash = nonempty(args.hash);
+  if (hasReceipt && hasHash) return fail('Provide a receipt or a hash, not both.');
+  if (!hasReceipt && !hasHash) return fail('Provide a receipt path or a hash.');
+
+  let hash = null;
+  if (hasHash) {
+    hash = normalizeHash(args.hash);
+    if (!hash) return fail('hash must be a 64-character SHA-256 hex string.');
+  }
+
+  let savedForHash = hash ? await findSavedStamp(hash) : null;
+  let receiptPath = hasReceipt ? String(args.receipt) : null;
+  if (!receiptPath && savedForHash && savedForHash.receipt_path) {
+    receiptPath = savedForHash.receipt_path;
+  }
+
+  if (!receiptPath) {
+    const info = savedOriginalInfo(savedForHash);
+    if (!info.found) {
+      return fail('No saved original or receipt was found for this hash.', {
+        hash,
+        saved_original: { found: false },
+        notes: [
+          "If this hash came from a website-made receipt, it is probably the SHA-256 of statement.json, not of the original file. Saved copies live under the file's own hash. Pass the receipt file to verify instead.",
+        ],
+      });
+    }
+    return {
+      ok: true,
+      hash,
+      saved_original: info,
+      notes: [
+        info.matches ? 'Found a locally saved copy of the original, and it matches this fingerprint.' : 'Found a locally saved copy of the original, but it does not match this fingerprint.',
+        'No receipt was found in that folder, so the full proof could not be checked. If you finished the stamp in the browser, pass the downloaded receipt to verify.',
+        'Receipts made on the LightDrawer website stamp statement.json, not the file itself, so their public /r/ fingerprint is different from the file hash.',
+      ],
+    };
+  }
 
   let verifier;
   try {
@@ -297,20 +409,38 @@ export async function verify(args = {}) {
 
   let files;
   try {
-    files = await readReceiptFiles(String(args.receipt), verifier);
+    files = await readReceiptFiles(receiptPath, verifier);
   } catch (err) {
     return fail(`Could not read the receipt: ${err.message}`);
   }
   if (!files['statement.json']) {
-    return fail('This does not look like a LightDrawer receipt (no statement.json).', { receipt: String(args.receipt) });
+    return fail('This does not look like a LightDrawer receipt (no statement.json).', { receipt: receiptPath });
   }
 
+  const statementHash = sha256Bytes(Buffer.from(files['statement.json']));
+  let subjectHash = null;
+  try {
+    const stmt = JSON.parse(new TextDecoder().decode(files['statement.json']));
+    subjectHash = normalizeHash(stmt && stmt.subject && stmt.subject.sha256);
+  } catch {
+    subjectHash = null;
+  }
+
+  let saved = null;
+  if (subjectHash) saved = await findSavedStamp(subjectHash);
+  if (!saved && statementHash) saved = await findSavedStamp(statementHash);
+  if (!saved && hash) saved = savedForHash;
+
   let original = null;
+  let usedSavedOriginal = false;
   try {
     if (nonempty(args.file)) {
       original = { bytes: await readFileBytes(args.file), name: String(args.file) };
     } else if (nonempty(args.text)) {
       original = { bytes: utf8Bytes(args.text), name: 'text' };
+    } else if (saved && saved.original_path) {
+      original = { bytes: await readFileBytes(saved.original_path), name: saved.original_name || saved.original_path };
+      usedSavedOriginal = true;
     }
   } catch (err) {
     return fail(err.message);
@@ -318,12 +448,28 @@ export async function verify(args = {}) {
 
   const result = await verifier.verifyReceipt(files, original, {});
   const summary = summarizeVerify(result);
+
+  if (hasReceipt) {
+    if (subjectHash) await saveReceiptCopy(subjectHash, receiptPath);
+    if (statementHash) await saveReceiptCopy(statementHash, receiptPath);
+  }
+
+  const notes = [];
+  if (usedSavedOriginal) {
+    notes.push(`Used the locally saved original at ${saved.original_path}.`);
+  }
+  if (subjectHash && statementHash && subjectHash !== statementHash) {
+    notes.push("This receipt stamps statement.json (the usual website receipt), not the file hash alone. The saved original lives under the file's own hash.");
+  }
+
   return {
     ok: true,
     verdict: summary.verdict,
-    receipt: String(args.receipt),
+    receipt: receiptPath,
     ...summary,
+    saved_original: savedOriginalInfo(saved),
     limits: VERIFY_LIMITS,
+    notes,
   };
 }
 
@@ -393,6 +539,7 @@ export async function lookup(args = {}, { fetchImpl = fetchJson } = {}) {
         ? 'This lookup used the SHA-256 of the file or text itself. That will not match a website-made receipt unless you pass the receipt file or its statement.json hash.'
         : 'Anyone can open the receipt_url. It shows only the fingerprint and timestamps, never a file.',
     ],
+    saved_original: savedOriginalInfo(await findSavedStamp(hash)),
   };
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "lightdrawer-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local MCP server for LightDrawer: hash files or text on your machine, stamp or look up the fingerprint at lightdrawer.org, and verify receipts offline. Only the hash ever leaves your computer.",
   "license": "MIT",
   "type": "module",
