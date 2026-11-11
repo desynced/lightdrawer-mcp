@@ -80,7 +80,7 @@ export async function hashFileOrText({ file, text }) {
 
 export const STAMP_DESCRIPTION = `Hash a file or some text locally (SHA-256) and timestamp that fingerprint with LightDrawer. The file or text never leaves this machine — only the 64-character hash is used.
 
-When LightDrawer's open stamp lane is available, this completes the stamp and returns a receipt link. The lane is limited per address per hour and has a daily total; if it is off or over its limit, this tool gives you a browser link instead: open it, drop the same file, complete the human check, and download the receipt. The recommended fallback link uses #digest=<hash>, which stays in the URL fragment and is not sent to any server.
+When LightDrawer's open stamp lane is available, this completes the stamp and returns a receipt link. The open lane currently has no hourly or daily cap. If the lane is switched off or temporarily limited, this tool gives you a browser link instead: open it, drop the same file, complete the human check, and download the receipt. The recommended fallback link uses #digest=<hash>, which stays in the URL fragment and is not sent to any server.
 
 A byte-for-byte copy of exactly what was hashed is saved locally (unless you turn that off) so you can verify later. Editing the file afterwards changes its fingerprint, and restamping does not prove the old stamp.
 

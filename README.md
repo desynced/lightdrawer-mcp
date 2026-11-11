@@ -123,9 +123,7 @@ Koru is a good fit for two everyday habits:
 
 Stamp fingerprints your file or text on this machine. The file itself is never uploaded.
 
-When LightDrawer’s open stamp lane is available, the stamp finishes there and you get a receipt link (`https://lightdrawer.org/r/<hash>`). That lane allows about 20 stamps per hour from one address, and about 500 stamps a day in total. Those caps protect the free public calendars and timestamp services LightDrawer uses.
-
-If the lane is switched off or is over its limit, the tool gives you a browser link instead so you can still finish:
+When LightDrawer’s open stamp lane is available, the stamp finishes there and you get a receipt link (`https://lightdrawer.org/r/<hash>`). The open lane currently has no hourly or daily cap. The operator can add limits later, or switch the lane off at any time. If the lane is off or over a limit, the tool gives you a browser link instead so you can still finish:
 
 1. Open the link it gives you. The recommended one uses `#digest=<hash>`, which stays in the browser and is not sent to any server.
 2. Drop the same file (or a file that contains the exact UTF-8 text).

@@ -2,6 +2,11 @@
 
 Every change to this MCP server that affects what it does or how it is set up is listed here, newest first.
 
+## [Unreleased]
+
+### Changed
+- Docs now say the open lane currently has no hourly or daily cap. The operator can add limits or switch the lane off at any time; if that happens, the tool falls back to the browser.
+
 ## [0.2.0] - 2026-11-10
 
 ### Added
