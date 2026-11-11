@@ -1,0 +1,12 @@
+LightDrawer MCP
+Copyright (c) 2026 Joe Ball
+
+This project is licensed under the MIT License. See LICENSE.
+
+The files under vendor/web/lib and vendor/trust are copied from
+LightDrawer (https://github.com/desynced/lightdrawer), commit a9ae10f,
+release 1.3.1. They are the offline receipt verifier (OpenTimestamps,
+RFC 3161, Certificate Transparency including precertificate SCT checks)
+and its pinned trust anchors, including trust/ct-logs.json.
+
+LightDrawer is also MIT-licensed, Copyright (c) 2026 Joe Ball.
