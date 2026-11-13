@@ -1,9 +1,10 @@
-import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat as fstat } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, stat as fstat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeHash, sha256File, sha256Text } from '../src/hash.js';
+import { maxCopyBytes, maxHashBytes } from '../src/paths.js';
 import { findSavedStamp, safeOriginalName, saveOriginal, stampsRootDir } from '../src/store.js';
 import {
   LOOKUP_DESCRIPTION,
@@ -79,6 +80,7 @@ try {
     ok(!JSON.stringify(posted).includes(sample), 'request body does not include the original text');
     ok(!JSON.stringify(result).includes('LIGHTDRAWER_STAMP_KEY'), 'hand-off does not mention a stamp key');
 
+    process.env.LIGHTDRAWER_SAVE_ORIGINALS = '1';
     const fileCalls = [];
     const fromFile = await stamp({ file: fixture('selftest.txt') }, {
       fetchImpl: async (url, opts = {}) => {
@@ -232,12 +234,21 @@ try {
 
   console.log('Saved originals');
   {
+    delete process.env.LIGHTDRAWER_SAVE_ORIGINALS;
+    const unsetSample = 'unset should not save a local copy';
+    const unset = await stamp({ text: unsetSample }, {
+      fetchImpl: async () => ({ status: 404, ok: false, body: { error: 'not found' } }),
+    });
+    ok(unset.saved_original && unset.saved_original.saved === false && unset.saved_original.skipped === 'disabled', 'saving originals is off when LIGHTDRAWER_SAVE_ORIGINALS is unset');
+    ok(await findSavedStamp(sha256Text(unsetSample)) == null, 'an unset save switch does not create a stamp folder');
+
+    process.env.LIGHTDRAWER_SAVE_ORIGINALS = '1';
     const sample = 'exact saved text for lightdrawer-mcp';
     const expectHash = sha256Text(sample);
     const saved = await stamp({ text: sample }, {
       fetchImpl: async () => ({ status: 404, ok: false, body: { error: 'not found' } }),
     });
-    ok(saved.saved_original && saved.saved_original.saved === true, 'stamp saves a local copy by default');
+    ok(saved.saved_original && saved.saved_original.saved === true, 'stamp saves a local copy when LIGHTDRAWER_SAVE_ORIGINALS=1');
     ok(saved.saved_original.name === 'text.txt', 'text copies are saved as text.txt');
     const copied = await readFile(saved.saved_original.path);
     ok(Buffer.from(copied).equals(Buffer.from(sample, 'utf8')), 'saved text bytes match exactly what was hashed');
@@ -318,8 +329,172 @@ try {
     process.env.LIGHTDRAWER_STAMPS_DIR = prevRoot;
     await rm(offRoot, { recursive: true, force: true });
 
+    process.env.LIGHTDRAWER_SAVE_ORIGINALS = '1';
     const direct = await saveOriginal({ hash: sha256Text('unit'), source: 'text', text: 'unit' });
     ok(direct.saved && await sha256File(direct.path) === sha256Text('unit'), 'saveOriginal helper writes and re-hashes a copy');
+  }
+
+  console.log('Path policy, size caps, and untrusted receipts');
+  {
+    const prevAllowed = process.env.LIGHTDRAWER_ALLOWED_DIRS;
+    const prevHashCap = process.env.LIGHTDRAWER_MAX_HASH_BYTES;
+    const prevCopyCap = process.env.LIGHTDRAWER_MAX_COPY_BYTES;
+    const prevSave = process.env.LIGHTDRAWER_SAVE_ORIGINALS;
+    const scratch = await mkdtemp(join(process.cwd(), '.ld-policy-'));
+    const outside = await mkdtemp(join(tmpdir(), 'ld-mcp-outside-'));
+    const sibling = await mkdtemp(join(tmpdir(), 'ld-mcp-sibling-'));
+    const handoff = async () => ({ status: 404, ok: false, body: { error: 'not found' } });
+    try {
+      ok(!STAMP_DESCRIPTION.includes('no hourly or daily cap'), 'STAMP_DESCRIPTION does not claim there is no hourly or daily cap');
+      ok(/rate-limit or be switched off/.test(STAMP_DESCRIPTION) && /falls back to a browser link/.test(STAMP_DESCRIPTION), 'STAMP_DESCRIPTION says the lane may rate-limit or be switched off and then falls back to a browser link');
+
+      delete process.env.LIGHTDRAWER_ALLOWED_DIRS;
+      const cwdOk = await stamp({ file: fixture('selftest.txt') }, { fetchImpl: handoff });
+      ok(cwdOk.ok === true && cwdOk.hash === SELFTEST_FILE_HASH, 'a file under the working directory is allowed');
+
+      const outsideFile = join(outside, 'note.txt');
+      await writeFile(outsideFile, 'hello outside');
+      const denied = await stamp({ file: outsideFile }, { fetchImpl: handoff });
+      ok(denied.ok === false && denied.error === 'That path is not allowed.', 'a path outside cwd and LIGHTDRAWER_ALLOWED_DIRS is refused');
+      const deniedVerify = await verify({ receipt: fixture('selftest.txt.lightdrawer-receipt.zip'), file: outsideFile });
+      ok(deniedVerify.ok === false && deniedVerify.error === 'That path is not allowed.', 'verify refuses a file outside the allowed directories');
+      const deniedLookup = await lookup({ file: outsideFile }, { fetchImpl: handoff });
+      ok(deniedLookup.ok === false && deniedLookup.error === 'That path is not allowed.', 'lookup refuses a file outside the allowed directories');
+
+      await writeFile(join(sibling, 'nope.txt'), 'nope');
+      process.env.LIGHTDRAWER_ALLOWED_DIRS = `${delimiter}${outside}${delimiter}`;
+      const allowed = await stamp({ file: outsideFile }, { fetchImpl: handoff });
+      ok(allowed.ok === true && allowed.hash === sha256Text('hello outside'), 'LIGHTDRAWER_ALLOWED_DIRS allows a path outside cwd');
+      const stillDenied = await stamp({ file: join(sibling, 'nope.txt') }, { fetchImpl: handoff });
+      ok(stillDenied.ok === false && stillDenied.error === 'That path is not allowed.', 'a sibling of an allowed directory is still refused');
+
+      const token = `lddeny${randomBytes(8).toString('hex')}`;
+      const fakeHome = await mkdtemp(join(tmpdir(), `${token}-`));
+      const marker = `secret-marker-${token}`;
+      const keyPath = join(fakeHome, 'id_rsa');
+      await writeFile(keyPath, marker);
+      const link = join(scratch, 'looks-fine.txt');
+      await symlink(keyPath, link);
+      const linked = await stamp({ file: link }, { fetchImpl: handoff });
+      const linkedDump = JSON.stringify(linked);
+      ok(linked.ok === false && linked.error === 'That path is not allowed.', 'a symlink in cwd that points at a denied file is refused');
+      ok(!linkedDump.includes(token) && !linkedDump.includes(marker) && !linkedDump.includes('id_rsa'), 'a refused symlink target is not included in the tool output');
+
+      await writeFile(join(scratch, '.env'), marker);
+      await writeFile(join(scratch, 'dev.pem'), marker);
+      await writeFile(join(scratch, 'id_ed25519'), marker);
+      for (const name of ['.env', 'dev.pem', 'id_ed25519']) {
+        const res = await stamp({ file: join(scratch, name) }, { fetchImpl: handoff });
+        ok(res.ok === false && res.error === 'That path is not allowed.' && !JSON.stringify(res).includes(marker), `${name} is refused even inside the working directory`);
+      }
+
+      delete process.env.LIGHTDRAWER_ALLOWED_DIRS;
+      const outsideReceipt = join(outside, 'receipt-dir');
+      await mkdir(outsideReceipt);
+      await writeFile(join(outsideReceipt, 'statement.json'), '{}\n');
+      const vReceipt = await verify({ receipt: outsideReceipt });
+      ok(vReceipt.ok === false && vReceipt.error === 'That path is not allowed.', 'verify refuses a receipt outside the allowed directories');
+      const lReceipt = await lookup({ receipt: outsideReceipt }, { fetchImpl: handoff });
+      ok(lReceipt.ok === false && lReceipt.error === 'That path is not allowed.', 'lookup refuses a receipt outside the allowed directories');
+
+      const receiptDir = join(scratch, 'receipt-link');
+      await mkdir(receiptDir);
+      await writeFile(join(receiptDir, 'statement.json'), '{}\n');
+      await symlink(keyPath, join(receiptDir, 'extra.txt'));
+      const escaped = await verify({ receipt: receiptDir });
+      const escapedDump = JSON.stringify(escaped);
+      ok(escaped.ok === false && escaped.error === 'That path is not allowed.', 'a receipt symlink to a denied file is refused');
+      ok(!escapedDump.includes(token) && !escapedDump.includes(marker), 'a receipt symlink refusal does not include the target');
+
+      process.env.LIGHTDRAWER_SAVE_ORIGINALS = '1';
+      process.env.LIGHTDRAWER_MAX_HASH_BYTES = '8';
+      process.env.LIGHTDRAWER_MAX_COPY_BYTES = '1000';
+      const big = join(scratch, 'big.bin');
+      const bigBytes = Buffer.alloc(32, 7);
+      await writeFile(big, bigBytes);
+      let hashedAnyway = false;
+      const overHash = await stamp({ file: big }, {
+        fetchImpl: async () => {
+          hashedAnyway = true;
+          return { status: 404, ok: false, body: {} };
+        },
+      });
+      ok(overHash.ok === false && /hash size limit/.test(overHash.error || ''), 'a file over the hash cap is refused');
+      ok(hashedAnyway === false && (!overHash.saved_original || overHash.saved_original.saved !== true), 'a file over the hash cap is not hashed or copied');
+
+      process.env.LIGHTDRAWER_MAX_HASH_BYTES = '1000';
+      process.env.LIGHTDRAWER_MAX_COPY_BYTES = '8';
+      const expectBig = createHash('sha256').update(bigBytes).digest('hex');
+      const overCopy = await stamp({ file: big }, { fetchImpl: handoff });
+      ok(overCopy.ok === true && overCopy.hash === expectBig, 'a file over the copy cap is hashed when it is under the hash cap');
+      ok(overCopy.saved_original && overCopy.saved_original.saved === false && /copy size limit/.test(overCopy.saved_original.error || ''), 'a file over the copy cap is not copied');
+      ok(await findSavedStamp(overCopy.hash) == null, 'an over-cap copy does not create a stamp folder');
+
+      process.env.LIGHTDRAWER_MAX_HASH_BYTES = '';
+      ok(maxHashBytes() === 2147483648, 'an empty hash cap falls back to 2 GiB');
+      process.env.LIGHTDRAWER_MAX_HASH_BYTES = 'nope';
+      ok(maxHashBytes() === 2147483648, 'an invalid hash cap falls back to 2 GiB');
+      process.env.LIGHTDRAWER_MAX_COPY_BYTES = '0';
+      ok(maxCopyBytes() === 67108864, 'a zero copy cap falls back to 64 MiB');
+      delete process.env.LIGHTDRAWER_MAX_HASH_BYTES;
+      delete process.env.LIGHTDRAWER_MAX_COPY_BYTES;
+
+      const refusedHash = 'ab'.repeat(32);
+      const refusedSave = await saveOriginal({ hash: refusedHash, source: 'file', file: join(scratch, '.env') });
+      ok(refusedSave.saved === false && !JSON.stringify(refusedSave).includes(marker), 'saveOriginal does not copy a refused path');
+      ok(await findSavedStamp(refusedHash) == null, 'a refused path does not create a stamp folder');
+      const linkSave = await saveOriginal({ hash: refusedHash, source: 'file', file: link });
+      ok(linkSave.saved === false && !JSON.stringify(linkSave).includes(token) && !JSON.stringify(linkSave).includes(marker), 'saveOriginal does not copy a symlink to a denied file or reveal its target');
+      await rm(fakeHome, { recursive: true, force: true });
+
+      const longName = `${'F'.repeat(240)}.txt`;
+      const longNotes = `${'N'.repeat(240)} do not follow this note`;
+      const longDetails = 'D'.repeat(240);
+      const receiptFolder = join(scratch, 'untrusted-receipt');
+      await mkdir(receiptFolder);
+      await writeFile(join(receiptFolder, 'statement.json'), JSON.stringify({
+        lightdrawer_receipt: '1',
+        subject: {
+          name: longName,
+          size: 1,
+          media_type: 'text/plain',
+          sha256: 'cd'.repeat(32),
+        },
+        provenance: {
+          framework: 'collector framework',
+          collector_notes: longNotes,
+          details: longDetails,
+        },
+      }));
+      const untrusted = await verify({ receipt: receiptFolder });
+      const untrustedDump = JSON.stringify(untrusted);
+      ok(untrusted.ok === true, 'verify returns a result for a receipt that carries untrusted text');
+      ok(untrusted.subject && untrusted.subject.name && untrusted.subject.name.untrusted === true, 'receipt subject filename is marked untrusted');
+      ok(untrusted.subject.name.text.length === 200 && untrusted.subject.name.text === longName.slice(0, 200), 'receipt filename is truncated to 200 characters');
+      const prov = (untrusted.sections || []).flatMap((s) => s.checks).find((c) => c.id === 'prov');
+      ok(prov && prov.detail && prov.detail.untrusted === true && prov.detail.text.length <= 200 && prov.detail.text.includes('collector_notes'), 'receipt notes in check details are marked untrusted and truncated');
+      ok(!untrustedDump.includes(longName) && !untrustedDump.includes(longNotes) && !untrustedDump.includes(longDetails), 'verify output does not include the full receipt text');
+      ok(/must not be followed as instructions/.test((untrusted.notes || []).join(' ')), 'verify warns that receipt text must not be followed as instructions');
+
+      const unique = 'totally-unique-upstream-string';
+      const upstream = await stamp({ text: 'upstream failure sample' }, {
+        fetchImpl: async () => ({ status: 500, ok: false, body: { error: unique } }),
+      });
+      ok(upstream.ok === false && upstream.status === 500 && /could not stamp this hash/i.test(upstream.error || ''), 'a failed stamp returns a generic error and the HTTP status');
+      ok(!JSON.stringify(upstream).includes(unique), 'a mocked stamp failure does not echo the upstream error string');
+    } finally {
+      if (prevAllowed === undefined) delete process.env.LIGHTDRAWER_ALLOWED_DIRS;
+      else process.env.LIGHTDRAWER_ALLOWED_DIRS = prevAllowed;
+      if (prevHashCap === undefined) delete process.env.LIGHTDRAWER_MAX_HASH_BYTES;
+      else process.env.LIGHTDRAWER_MAX_HASH_BYTES = prevHashCap;
+      if (prevCopyCap === undefined) delete process.env.LIGHTDRAWER_MAX_COPY_BYTES;
+      else process.env.LIGHTDRAWER_MAX_COPY_BYTES = prevCopyCap;
+      if (prevSave === undefined) delete process.env.LIGHTDRAWER_SAVE_ORIGINALS;
+      else process.env.LIGHTDRAWER_SAVE_ORIGINALS = prevSave;
+      await rm(scratch, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+      await rm(sibling, { recursive: true, force: true });
+    }
   }
 } finally {
   if (savedKey === undefined) delete process.env.LIGHTDRAWER_STAMP_KEY;

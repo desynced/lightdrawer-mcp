@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { inspectAllowedFile, SafeToolError } from './paths.js';
 
 export const HEX64_RE = /^[0-9a-f]{64}$/;
 
@@ -21,18 +22,24 @@ export function sha256Text(text) {
 }
 
 export async function sha256File(filePath) {
-  const info = await stat(filePath);
-  if (!info.isFile()) throw new Error(`Not a regular file: ${filePath}`);
+  const { resolved } = await inspectAllowedFile(filePath, 'hash');
   const hash = createHash('sha256');
-  const stream = createReadStream(filePath);
-  for await (const chunk of stream) hash.update(chunk);
+  const stream = createReadStream(resolved);
+  try {
+    for await (const chunk of stream) hash.update(chunk);
+  } catch {
+    throw new SafeToolError('Could not read that file.');
+  }
   return hash.digest('hex');
 }
 
 export async function readFileBytes(filePath) {
-  const info = await stat(filePath);
-  if (!info.isFile()) throw new Error(`Not a regular file: ${filePath}`);
-  return new Uint8Array(await readFile(filePath));
+  const { resolved } = await inspectAllowedFile(filePath, 'hash');
+  try {
+    return new Uint8Array(await readFile(resolved));
+  } catch {
+    throw new SafeToolError('Could not read that file.');
+  }
 }
 
 export function utf8Bytes(text) {

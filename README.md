@@ -8,7 +8,7 @@ LightDrawer itself is the website and Cloudflare Worker at [lightdrawer.org](htt
 
 ## What you can do
 
-1. **stamp** — fingerprint a local file or some text and timestamp it with LightDrawer. When the open stamp lane is available, this finishes in one step and returns a receipt link. If the lane is off or full, you get a browser link instead: open it, drop the same file, complete the site’s human check, and download your receipt. A byte-for-byte copy of exactly what was hashed is saved on your computer so you can verify later.
+1. **stamp** — fingerprint a local file or some text and timestamp it with LightDrawer. When the open stamp lane is available, this finishes in one step and returns a receipt link. If the lane is off or full, you get a browser link instead: open it, drop the same file, complete the site’s human check, and download your receipt. A byte-for-byte copy of exactly what was hashed is saved on your computer only when you turn that on, so you can verify later.
 2. **verify** — check a LightDrawer receipt ZIP on your machine, or pass just a hash to look up a saved original. If you do not pass the original file or text, the tool will try to find the saved copy automatically.
 3. **lookup** — ask LightDrawer whether it has a public record for a fingerprint, and get the `https://lightdrawer.org/r/<hash>` page. If a local saved copy exists, the result mentions it.
 
@@ -16,16 +16,26 @@ LightDrawer itself is the website and Cloudflare Worker at [lightdrawer.org](htt
 
 - Files and text are hashed locally with SHA-256.
 - Only that 64-character hash is sent to lightdrawer.org (never the file). Stamp POSTs it to the open lane; if that lane is off or full, you get a browser link instead.
-- A copy of the original is saved only on your computer. It is never uploaded.
+- A copy of the original is saved only on your computer, and only when `LIGHTDRAWER_SAVE_ORIGINALS` is turned on. It is never uploaded.
 - Verify runs entirely on your machine and uploads nothing.
 - This server does not add AI.
+
+## Security and what this tool can read
+
+Only the SHA-256 fingerprint leaves this machine. The file or text stays local.
+
+This tool can read local files that you, or the AI client, point it at. After it resolves symlinks, a path is allowed only when it stays under the current working directory, a directory listed in `LIGHTDRAWER_ALLOWED_DIRS`, or the stamps folder. `LIGHTDRAWER_ALLOWED_DIRS` is split on the platform path delimiter (`:` on macOS and Linux, `;` on Windows). Well-known secret locations and file names, such as `~/.ssh`, `.env`, and private keys, are refused even inside an allowed directory.
+
+A copy of the original is saved under `~/.lightdrawer/stamps` only when `LIGHTDRAWER_SAVE_ORIGINALS` is turned on.
+
+To report a problem, see [SECURITY.md](SECURITY.md).
 
 ## Install
 
 You need [Node.js](https://nodejs.org) 18 or newer. You do not need to publish or install a package from the npm registry.
 
 ```sh
-npx -y github:desynced/lightdrawer-mcp
+npx -y github:desynced/lightdrawer-mcp#v0.3.0
 ```
 
 That is also the command your MCP client should run. No API key and no extra environment variables are required.
@@ -41,7 +51,7 @@ That is also the command your MCP client should run. No API key and no extra env
   "mcpServers": {
     "lightdrawer": {
       "command": "npx",
-      "args": ["-y", "github:desynced/lightdrawer-mcp"]
+      "args": ["-y", "github:desynced/lightdrawer-mcp#v0.3.0"]
     }
   }
 }
@@ -59,7 +69,7 @@ Add the same `mcpServers` block to:
 ### Claude Code
 
 ```sh
-claude mcp add lightdrawer -- npx -y github:desynced/lightdrawer-mcp
+claude mcp add lightdrawer -- npx -y github:desynced/lightdrawer-mcp#v0.3.0
 ```
 
 Or put the same `mcpServers` block in a project `.mcp.json` file.
@@ -77,7 +87,7 @@ In `.vscode/mcp.json`:
   "servers": {
     "lightdrawer": {
       "command": "npx",
-      "args": ["-y", "github:desynced/lightdrawer-mcp"]
+      "args": ["-y", "github:desynced/lightdrawer-mcp#v0.3.0"]
     }
   }
 }
@@ -88,7 +98,7 @@ In `.vscode/mcp.json`:
 If the client can start a local stdio server, point it at:
 
 ```sh
-npx -y github:desynced/lightdrawer-mcp
+npx -y github:desynced/lightdrawer-mcp#v0.3.0
 ```
 
 From a local checkout (useful before you rely on the GitHub install):
@@ -123,7 +133,7 @@ Koru is a good fit for two everyday habits:
 
 Stamp fingerprints your file or text on this machine. The file itself is never uploaded.
 
-When LightDrawer’s open stamp lane is available, the stamp finishes there and you get a receipt link (`https://lightdrawer.org/r/<hash>`). The open lane currently has no hourly or daily cap. The operator can add limits later, or switch the lane off at any time. If the lane is off or over a limit, the tool gives you a browser link instead so you can still finish:
+When LightDrawer’s open stamp lane is available, the stamp finishes there and you get a receipt link (`https://lightdrawer.org/r/<hash>`). The lane may rate-limit or be switched off. If that happens, the tool falls back to a browser link so you can still finish:
 
 1. Open the link it gives you. The recommended one uses `#digest=<hash>`, which stays in the browser and is not sent to any server.
 2. Drop the same file (or a file that contains the exact UTF-8 text).
@@ -136,14 +146,14 @@ A second link with `?expect=<hash>` is also provided; that hash is in the query 
 
 Editing a note later changes its fingerprint. Stamping the edited note is a new stamp — it does not prove the old one. The only way to check an earlier stamp is to still have the exact bytes that were hashed.
 
-So each stamp saves a byte-for-byte copy of exactly what was hashed, locally only:
+Saving that copy is off unless you turn it on. Set `LIGHTDRAWER_SAVE_ORIGINALS` to `1`, `true`, `on`, or `yes` to save a byte-for-byte copy of exactly what was hashed, locally only:
 
 - Default folder: `~/.lightdrawer/stamps/<hash>/` (that home folder works on every OS).
 - Inside: the original (keeping the file’s own name, or `text.txt` for text), a small `stamp.json` (hash, time, source, original path, how it was stamped, and the receipt link), and the receipt once there is one.
 - Change the folder with `LIGHTDRAWER_STAMPS_DIR`.
-- Turn saving off with `LIGHTDRAWER_SAVE_ORIGINALS=0`.
+- Leave `LIGHTDRAWER_SAVE_ORIGINALS` unset, or set it to `0`, `false`, `off`, or `no`, and nothing is saved.
 
-There is no size cap, because a partial copy cannot be verified later. The saved copy is the same size as the original, so keep an eye on disk space.
+`LIGHTDRAWER_MAX_HASH_BYTES` is the largest file the tool will hash (default `2147483648`, which is 2 GiB). `LIGHTDRAWER_MAX_COPY_BYTES` is the largest file it will copy into the stamps folder (default `67108864`, which is 64 MiB). A file over the copy limit can still be hashed, up to the hash limit, but no local copy is saved. An invalid or empty value falls back to the default. The saved copy is the same size as the original, so keep an eye on disk space.
 
 Copies never leave your computer. LightDrawer does not see them. Back up `~/.lightdrawer/stamps` (or your custom folder) if you care about those files — this tool does not upload them anywhere.
 

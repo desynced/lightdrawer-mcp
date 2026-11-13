@@ -1,20 +1,23 @@
 // Local, private copies of exactly what was hashed at stamp time.
-// Nothing here is uploaded. There is no size cap: a partial copy cannot be
-// verified later, and the saved bytes are the same size as the original.
+// Nothing here is uploaded. A copy is saved only when the user turns
+// LIGHTDRAWER_SAVE_ORIGINALS on, and only up to LIGHTDRAWER_MAX_COPY_BYTES.
 import { randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { chmod, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { normalizeHash, sha256File, utf8Bytes } from './hash.js';
+import { copyTooBigMessage, inspectAllowedFile, maxCopyBytes, SafeToolError } from './paths.js';
 
 export const STAMP_META_NAME = 'stamp.json';
 export const STAMP_RECEIPT_NAME = 'receipt.zip';
 
+const SAVE_ON = new Set(['1', 'true', 'on', 'yes']);
+
 export function saveOriginalsEnabled() {
   const raw = process.env.LIGHTDRAWER_SAVE_ORIGINALS;
-  if (raw == null || String(raw).trim() === '') return true;
-  return !['0', 'false', 'off', 'no'].includes(String(raw).trim().toLowerCase());
+  if (raw == null) return false;
+  return SAVE_ON.has(String(raw).trim().toLowerCase());
 }
 
 export function stampsRootDir() {
@@ -75,6 +78,7 @@ async function atomicWriteFile(dest, bytes) {
 }
 
 async function atomicCopyFile(src, dest) {
+  const { resolved } = await inspectAllowedFile(src, 'copy');
   const dir = dirname(dest);
   const tmp = join(dir, `.tmp.${randomBytes(8).toString('hex')}`);
   assertInside(dir, tmp);
@@ -82,7 +86,7 @@ async function atomicCopyFile(src, dest) {
   let fh;
   try {
     fh = await open(tmp, 'w', 0o600);
-    const reader = createReadStream(src);
+    const reader = createReadStream(resolved);
     for await (const chunk of reader) {
       await fh.write(chunk);
     }
@@ -114,10 +118,34 @@ export async function readStampRecord(dir) {
   }
 }
 
+function refusedSave(err) {
+  const tooBig = err instanceof SafeToolError && err.message.includes('copy size limit');
+  return {
+    saved: false,
+    skipped: tooBig ? 'too_large' : 'refused',
+    error: err instanceof SafeToolError ? err.message : 'Could not save a local copy of the original.',
+  };
+}
+
 export async function saveOriginal({ hash, source, file, text }) {
   if (!saveOriginalsEnabled()) return { saved: false, skipped: 'disabled' };
   const h = normalizeHash(hash);
-  if (!h) throw new Error('hash must be a 64-character SHA-256 hex string.');
+  if (!h) throw new SafeToolError('hash must be a 64-character SHA-256 hex string.');
+  let resolvedSource = null;
+  if (source === 'text') {
+    if (utf8Bytes(text ?? '').length > maxCopyBytes()) {
+      return { saved: false, skipped: 'too_large', error: copyTooBigMessage() };
+    }
+  } else {
+    if (!file) return refusedSave(new SafeToolError('Provide a file path to save a file copy.'));
+    try {
+      const inspected = await inspectAllowedFile(file, 'copy');
+      resolvedSource = inspected.resolved;
+    } catch (err) {
+      if (err instanceof SafeToolError) return refusedSave(err);
+      return refusedSave(new SafeToolError('Could not save a local copy of the original.'));
+    }
+  }
   const root = stampsRootDir();
   const dir = join(root, h);
   await ensurePrivateDir(root);
@@ -136,7 +164,7 @@ export async function saveOriginal({ hash, source, file, text }) {
     const info = await stat(dest);
     if (info.isFile()) {
       const existing = await sha256File(dest);
-      if (existing !== h) throw new Error('A different file already exists in this stamp folder.');
+      if (existing !== h) throw new SafeToolError('A different file already exists in this stamp folder.');
       reused = true;
     }
   } catch (err) {
@@ -147,13 +175,12 @@ export async function saveOriginal({ hash, source, file, text }) {
     if (source === 'text') {
       await atomicWriteFile(dest, utf8Bytes(text));
     } else {
-      if (!file) throw new Error('Provide a file path to save a file copy.');
-      await atomicCopyFile(file, dest);
+      await atomicCopyFile(resolvedSource, dest);
     }
     const check = await sha256File(dest);
     if (check !== h) {
       try { await rm(dest, { force: true }); } catch { /* ignore */ }
-      throw new Error('The saved copy did not match the fingerprint. The copy was removed.');
+      throw new SafeToolError('The saved copy did not match the fingerprint. The copy was removed.');
     }
   }
 
@@ -201,7 +228,12 @@ export async function saveReceiptCopy(hash, receiptPath) {
   } catch (err) {
     if (!err || err.code !== 'ENOENT') throw err;
   }
-  await atomicCopyFile(receiptPath, dest);
+  try {
+    await atomicCopyFile(receiptPath, dest);
+  } catch (err) {
+    if (err instanceof SafeToolError) return { saved: false, skipped: 'refused', error: err.message };
+    return { saved: false, skipped: 'refused', error: 'Could not save a local copy of the receipt.' };
+  }
   return { saved: true, path: dest };
 }
 

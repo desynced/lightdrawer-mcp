@@ -1,4 +1,4 @@
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 export const PACKAGE_NAME = 'lightdrawer-mcp';
 export const DEFAULT_ORIGIN = 'https://lightdrawer.org';
 // Reserved for a future open, rate-limited stamp lane on lightdrawer.org.
