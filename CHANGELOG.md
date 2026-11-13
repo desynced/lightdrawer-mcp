@@ -2,6 +2,15 @@
 
 Every change to this MCP server that affects what it does or how it is set up is listed here, newest first.
 
+## [0.3.1] - 2026-11-12
+
+### Security
+- The current working directory is no longer an allowed folder when it is your home folder or the root of a disk. A client that starts there cannot read the rest of the machine through this server. The same applies to a `LIGHTDRAWER_ALLOWED_DIRS` entry that is exactly your home folder or a disk root: it is ignored, and the server writes one line to stderr without the path. A subfolder of your home folder still works. The stamps folder stays allowed. If your client starts in your home folder, set `LIGHTDRAWER_ALLOWED_DIRS` to the folders you want stamped.
+- A note on a timestamp in a verify result comes from the receipt. It is marked untrusted and shortened like other receipt text. When the receipt has no note, the field is an empty string.
+
+### Changed
+- Install instructions use the pinned tag `v0.3.1`.
+
 ## [0.3.0] - 2026-11-12
 
 ### Security

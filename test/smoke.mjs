@@ -109,9 +109,21 @@ try {
     arguments: { text: sample },
   });
   const stampBody = parseToolText(stamped);
-  ok(stampBody.ok && stampBody.mode === 'browser_handoff', 'keyless stamp over stdio returns a browser hand-off');
-  ok(stampBody.hash === sha256Text(sample), 'keyless stamp hash matches the text');
-  ok(stampBody.handoff.fragment_url.endsWith('#digest=' + stampBody.hash), 'keyless stamp includes #digest= hand-off link');
+  const expectHash = sha256Text(sample);
+  ok(stampBody.hash === expectHash, 'keyless stamp hash matches the text');
+  const handoff = stampBody.ok === true
+    && stampBody.mode === 'browser_handoff'
+    && stampBody.handoff
+    && typeof stampBody.handoff.fragment_url === 'string'
+    && stampBody.handoff.fragment_url.endsWith('#digest=' + expectHash);
+  const receiptLink = typeof stampBody.receipt_url === 'string' && stampBody.receipt_url.includes('/r/' + expectHash);
+  const receiptId = stampBody.receipt_id != null && String(stampBody.receipt_id).length > 0;
+  const openLane = stampBody.ok === true && stampBody.hash === expectHash && (receiptLink || receiptId);
+  ok(handoff || openLane, handoff
+    ? 'keyless stamp over stdio returns a browser hand-off'
+    : openLane
+      ? 'keyless stamp over stdio returns a finished open-lane stamp'
+      : 'keyless stamp over stdio returned neither a browser hand-off nor an open-lane stamp');
 } catch (err) {
   console.log('  FAIL smoke test error: ' + (err && err.message ? err.message : err));
   failed++;

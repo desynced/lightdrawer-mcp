@@ -24,7 +24,7 @@ LightDrawer itself is the website and Cloudflare Worker at [lightdrawer.org](htt
 
 Only the SHA-256 fingerprint leaves this machine. The file or text stays local.
 
-This tool can read local files that you, or the AI client, point it at. After it resolves symlinks, a path is allowed only when it stays under the current working directory, a directory listed in `LIGHTDRAWER_ALLOWED_DIRS`, or the stamps folder. `LIGHTDRAWER_ALLOWED_DIRS` is split on the platform path delimiter (`:` on macOS and Linux, `;` on Windows). Well-known secret locations and file names, such as `~/.ssh`, `.env`, and private keys, are refused even inside an allowed directory.
+This tool can read local files that you, or the AI client, point it at. After it resolves symlinks, a path is allowed only when it stays under the current working directory, a directory listed in `LIGHTDRAWER_ALLOWED_DIRS`, or the stamps folder. The current working directory is not added when it is your home folder or a filesystem root (`/` on macOS and Linux, or a drive root such as `C:\` on Windows). An entry in `LIGHTDRAWER_ALLOWED_DIRS` that is exactly your home folder or a filesystem root is ignored, and one line is written to stderr without the path. A subfolder of your home folder is fine. If your client starts in your home folder, set `LIGHTDRAWER_ALLOWED_DIRS` to the folders you want stamped. `LIGHTDRAWER_ALLOWED_DIRS` is split on the platform path delimiter (`:` on macOS and Linux, `;` on Windows). Well-known secret locations and file names, such as `~/.ssh`, `.env`, and private keys, are refused even inside an allowed directory.
 
 A copy of the original is saved under `~/.lightdrawer/stamps` only when `LIGHTDRAWER_SAVE_ORIGINALS` is turned on.
 
@@ -35,7 +35,7 @@ To report a problem, see [SECURITY.md](SECURITY.md).
 You need [Node.js](https://nodejs.org) 18 or newer. You do not need to publish or install a package from the npm registry.
 
 ```sh
-npx -y github:desynced/lightdrawer-mcp#v0.3.0
+npx -y github:desynced/lightdrawer-mcp#v0.3.1
 ```
 
 That is also the command your MCP client should run. No API key and no extra environment variables are required.
@@ -51,7 +51,7 @@ That is also the command your MCP client should run. No API key and no extra env
   "mcpServers": {
     "lightdrawer": {
       "command": "npx",
-      "args": ["-y", "github:desynced/lightdrawer-mcp#v0.3.0"]
+      "args": ["-y", "github:desynced/lightdrawer-mcp#v0.3.1"]
     }
   }
 }
@@ -69,7 +69,7 @@ Add the same `mcpServers` block to:
 ### Claude Code
 
 ```sh
-claude mcp add lightdrawer -- npx -y github:desynced/lightdrawer-mcp#v0.3.0
+claude mcp add lightdrawer -- npx -y github:desynced/lightdrawer-mcp#v0.3.1
 ```
 
 Or put the same `mcpServers` block in a project `.mcp.json` file.
@@ -87,7 +87,7 @@ In `.vscode/mcp.json`:
   "servers": {
     "lightdrawer": {
       "command": "npx",
-      "args": ["-y", "github:desynced/lightdrawer-mcp#v0.3.0"]
+      "args": ["-y", "github:desynced/lightdrawer-mcp#v0.3.1"]
     }
   }
 }
@@ -98,7 +98,7 @@ In `.vscode/mcp.json`:
 If the client can start a local stdio server, point it at:
 
 ```sh
-npx -y github:desynced/lightdrawer-mcp#v0.3.0
+npx -y github:desynced/lightdrawer-mcp#v0.3.1
 ```
 
 From a local checkout (useful before you rely on the GitHub install):
@@ -194,7 +194,7 @@ npm run test:smoke  # speak MCP over stdio; live lookup of the example receipt
 
 The smoke test looks up the public example receipt at
 `https://lightdrawer.org/r/d83f8a256bfc0c6817290c2af8d63c86370147e2f4e7f6cb7009d6fb7a7f97ad`
-and does a keyless stamp of some text. That stamp POSTs only the hash to `/api/mcp/stamp`. If the open lane is not available, the tool returns the browser hand-off.
+and does one keyless stamp of some text. That stamp POSTs only the hash to `/api/mcp/stamp`. The smoke test passes when the open lane returns a receipt, and it also passes when the lane is unavailable and the tool returns the browser hand-off.
 
 Stamp first POSTs only the hash to `/api/mcp/stamp`. The request body matches `POST /api/stamp`: `{ "digest": "<64-hex>", "tsq": "..." }`. If that lane is off, full, or unreachable, the tool falls back to the browser hand-off. Existing installs need no config change when the lane is turned on.
 
