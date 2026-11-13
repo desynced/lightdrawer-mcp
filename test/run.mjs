@@ -1,10 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, stat as fstat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, join, parse } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeHash, sha256File, sha256Text } from '../src/hash.js';
-import { maxCopyBytes, maxHashBytes } from '../src/paths.js';
+import { IGNORED_BROAD_ROOT_MESSAGE, isSecretBasename, maxCopyBytes, maxHashBytes } from '../src/paths.js';
 import { findSavedStamp, safeOriginalName, saveOriginal, stampsRootDir } from '../src/store.js';
 import {
   LOOKUP_DESCRIPTION,
@@ -12,8 +12,10 @@ import {
   VERIFY_DESCRIPTION,
   lookup,
   stamp,
+  summarizeVerify,
   verify,
 } from '../src/tools.js';
+import { loadVerifier } from '../src/verifier.js';
 import { TOOL_NAMES, createServer } from '../src/server.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,6 +31,28 @@ const ok = (cond, msg) => {
   console.log((cond ? '  ok   ' : '  FAIL ') + msg);
   if (!cond) failed++;
 };
+
+async function withStderr(fn) {
+  const chunks = [];
+  const orig = process.stderr.write;
+  process.stderr.write = (chunk, encoding, cb) => {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+    if (typeof encoding === 'function') encoding();
+    else if (typeof cb === 'function') cb();
+    return true;
+  };
+  try {
+    const result = await fn();
+    const lines = chunks.join('').split('\n').filter((line) => line.length > 0);
+    return { result, lines };
+  } finally {
+    process.stderr.write = orig;
+  }
+}
+
+function checkStatuses(result) {
+  return (result.sections || []).flatMap((section) => (section.checks || []).map((check) => `${check.id}:${check.status}`));
+}
 
 const savedKey = process.env.LIGHTDRAWER_STAMP_KEY;
 delete process.env.LIGHTDRAWER_STAMP_KEY;
@@ -50,7 +74,9 @@ try {
   console.log('Tool schemas');
   {
     ok(TOOL_NAMES.join(',') === 'stamp,verify,lookup', 'three tools in the expected order');
+    const homeHint = 'If your client starts in your home folder, set LIGHTDRAWER_ALLOWED_DIRS to the folders you want stamped.';
     ok(/#digest=/.test(STAMP_DESCRIPTION) && /browser/.test(STAMP_DESCRIPTION) && !/LIGHTDRAWER_STAMP_KEY/.test(STAMP_DESCRIPTION), 'stamp describes the keyless browser hand-off');
+    ok(STAMP_DESCRIPTION.includes(homeHint) && VERIFY_DESCRIPTION.includes(homeHint) && LOOKUP_DESCRIPTION.includes(homeHint), 'tool descriptions say to set LIGHTDRAWER_ALLOWED_DIRS when a client starts in the home folder');
     ok(/offline/.test(VERIFY_DESCRIPTION) && /precertificate/.test(VERIFY_DESCRIPTION) && /does not/.test(VERIFY_DESCRIPTION), 'verify describes offline checks and limits');
     ok(/statement\.json/.test(LOOKUP_DESCRIPTION) && /\/r\//.test(LOOKUP_DESCRIPTION), 'lookup explains website receipt fingerprints');
     const server = createServer();
@@ -216,6 +242,10 @@ try {
     ok(matching.statement_sha256 === SELFTEST_STATEMENT_HASH, 'statement SHA-256 matches the public receipt page');
     ok(fileCheck && fileCheck.status === 'pass', 'matching file is accepted');
     ok(matching.verdict === 'pass', 'complete example receipt verifies offline (verdict ' + matching.verdict + ')');
+    const freeTsa = (matching.times || []).find((t) => t.source === 'RFC 3161 (FreeTSA)');
+    const sctNote = (matching.times || []).find((t) => typeof t.source === 'string' && t.source.startsWith('Certificate Transparency SCT'));
+    ok(freeTsa && freeTsa.note === '', 'a timestamp with no note is an empty string');
+    ok(sctNote && sctNote.note && sctNote.note.untrusted === true && typeof sctNote.note.text === 'string' && sctNote.note.text.startsWith('SCT timestamp:') && sctNote.note.text.length <= 200, 'a timestamp note from the receipt is marked untrusted');
     ok(Array.isArray(matching.limits) && matching.limits.some((l) => /Bitcoin block lookup is not performed/.test(l)), 'states that Bitcoin is not checked online');
 
     const mismatch = await verify({ receipt, text: 'this is not the original file' });
@@ -230,6 +260,36 @@ try {
 
     const missing = await verify({});
     ok(missing.ok === false, 'verify requires a receipt path or a hash');
+  }
+
+  console.log('Receipt folder matches the zip');
+  {
+    const prevAllowed = process.env.LIGHTDRAWER_ALLOWED_DIRS;
+    const zipPath = fixture('selftest.txt.lightdrawer-receipt.zip');
+    const extracted = await mkdtemp(join(tmpdir(), 'ld-mcp-receipt-'));
+    try {
+      const verifier = loadVerifier();
+      const members = await verifier.zipRead(new Uint8Array(await readFile(zipPath)));
+      const secretMembers = Object.keys(members).filter((name) => isSecretBasename(name));
+      ok(secretMembers.length > 0, 'the example receipt contains a secret-named member for the folder reader to skip');
+      for (const [name, data] of Object.entries(members)) {
+        const dest = join(extracted, name);
+        await mkdir(dirname(dest), { recursive: true });
+        await writeFile(dest, Buffer.from(data));
+      }
+      process.env.LIGHTDRAWER_ALLOWED_DIRS = extracted;
+      const fromZip = await verify({ receipt: zipPath });
+      const fromDir = await verify({ receipt: extracted });
+      const zipStatus = checkStatuses(fromZip);
+      const dirStatus = checkStatuses(fromDir);
+      ok(fromZip.ok === true && fromDir.ok === true, 'verify accepts the example receipt as a zip and as a folder');
+      ok(fromDir.verdict === fromZip.verdict, 'unzipped receipt verdict matches the zip (' + fromDir.verdict + ' vs ' + fromZip.verdict + ')');
+      ok(zipStatus.length > 0 && zipStatus.join(',') === dirStatus.join(','), 'unzipped receipt check statuses match the zip');
+    } finally {
+      if (prevAllowed === undefined) delete process.env.LIGHTDRAWER_ALLOWED_DIRS;
+      else process.env.LIGHTDRAWER_ALLOWED_DIRS = prevAllowed;
+      await rm(extracted, { recursive: true, force: true });
+    }
   }
 
   console.log('Saved originals');
@@ -476,12 +536,99 @@ try {
       ok(!untrustedDump.includes(longName) && !untrustedDump.includes(longNotes) && !untrustedDump.includes(longDetails), 'verify output does not include the full receipt text');
       ok(/must not be followed as instructions/.test((untrusted.notes || []).join(' ')), 'verify warns that receipt text must not be followed as instructions');
 
+      const longNote = `${'N'.repeat(240)} follow this note`;
+      const summarized = summarizeVerify({
+        verdict: 'pass',
+        sections: [],
+        times: [
+          { source: 'RFC 3161 (FreeTSA)', time: '2026-11-12T00:00:00.000Z' },
+          { source: 'noted', time: new Date('2026-11-12T00:00:01.000Z'), note: longNote },
+        ],
+      });
+      ok(summarized.times[0].note === '', 'summarizeVerify uses an empty string when a timestamp note is absent');
+      ok(summarized.times[1].note && summarized.times[1].note.untrusted === true && summarized.times[1].note.text.length === 200 && summarized.times[1].note.text === 'N'.repeat(200), 'summarizeVerify marks a timestamp note untrusted and cuts it to 200 characters');
+      ok(!JSON.stringify(summarized).includes('follow this note'), 'a shortened timestamp note does not keep the rest of the receipt text');
+
       const unique = 'totally-unique-upstream-string';
       const upstream = await stamp({ text: 'upstream failure sample' }, {
         fetchImpl: async () => ({ status: 500, ok: false, body: { error: unique } }),
       });
       ok(upstream.ok === false && upstream.status === 500 && /could not stamp this hash/i.test(upstream.error || ''), 'a failed stamp returns a generic error and the HTTP status');
       ok(!JSON.stringify(upstream).includes(unique), 'a mocked stamp failure does not echo the upstream error string');
+
+      const prevCwd = process.cwd();
+      const prevHome = process.env.HOME;
+      const prevProfile = process.env.USERPROFILE;
+      const prevStamps = process.env.LIGHTDRAWER_STAMPS_DIR;
+      const stubHome = await mkdtemp(join(tmpdir(), 'ld-mcp-home-'));
+      const project = await mkdtemp(join(tmpdir(), 'ld-mcp-project-'));
+      const anywhereDir = await mkdtemp(join(tmpdir(), 'ld-mcp-anywhere-'));
+      try {
+        process.env.HOME = stubHome;
+        process.env.USERPROFILE = stubHome;
+        const projectFile = join(project, 'notes.txt');
+        await writeFile(projectFile, 'project notes');
+        const homeFile = join(stubHome, 'notes.txt');
+        await writeFile(homeFile, 'at home');
+        const anywhereFile = join(anywhereDir, 'anywhere.txt');
+        await writeFile(anywhereFile, 'anywhere');
+        const sub = join(stubHome, 'projects');
+        await mkdir(sub);
+        const subFile = join(sub, 'draft.txt');
+        await writeFile(subFile, 'draft');
+        const homeStamps = join(stubHome, '.lightdrawer', 'stamps');
+        await mkdir(homeStamps, { recursive: true });
+        const keptFile = join(homeStamps, 'kept.txt');
+        await writeFile(keptFile, 'kept stamp');
+
+        delete process.env.LIGHTDRAWER_ALLOWED_DIRS;
+        process.chdir(project);
+        const inProject = await stamp({ file: projectFile }, { fetchImpl: handoff });
+        ok(inProject.ok === true && inProject.hash === sha256Text('project notes'), 'cwd = a normal project folder still allows a file inside it');
+
+        process.env.LIGHTDRAWER_STAMPS_DIR = homeStamps;
+        process.chdir(stubHome);
+        const atHome = await withStderr(() => stamp({ file: homeFile }, { fetchImpl: handoff }));
+        ok(atHome.result.ok === false && atHome.result.error === 'That path is not allowed.', 'cwd = home refuses a file in the home folder');
+        ok(!JSON.stringify(atHome.result).includes(stubHome) && atHome.lines.length === 0, 'a home-folder refusal stays generic and does not print the path');
+        const kept = await stamp({ file: keptFile }, { fetchImpl: handoff });
+        ok(kept.ok === true && kept.hash === sha256Text('kept stamp'), 'the stamps folder stays allowed when cwd is the home folder');
+
+        const fsRoot = parse(project).root;
+        process.chdir(fsRoot);
+        const atRoot = await stamp({ file: anywhereFile }, { fetchImpl: handoff });
+        ok(atRoot.ok === false && atRoot.error === 'That path is not allowed.', 'cwd = filesystem root refuses a file anywhere');
+        const projectFromRoot = await stamp({ file: projectFile }, { fetchImpl: handoff });
+        ok(projectFromRoot.ok === false && projectFromRoot.error === 'That path is not allowed.', 'cwd = filesystem root refuses a file in a normal project folder');
+
+        process.chdir(project);
+        process.env.LIGHTDRAWER_ALLOWED_DIRS = stubHome;
+        const ignoredHome = await withStderr(() => stamp({ file: homeFile }, { fetchImpl: handoff }));
+        ok(ignoredHome.result.ok === false && ignoredHome.result.error === 'That path is not allowed.', 'LIGHTDRAWER_ALLOWED_DIRS set to the home folder is ignored');
+        ok(ignoredHome.lines.length === 1 && ignoredHome.lines[0] === IGNORED_BROAD_ROOT_MESSAGE && !ignoredHome.lines[0].includes(stubHome), 'ignoring the home folder writes one stderr line and does not print the path');
+
+        process.env.LIGHTDRAWER_ALLOWED_DIRS = sub;
+        process.chdir(fsRoot);
+        const allowedSub = await withStderr(() => stamp({ file: subFile }, { fetchImpl: handoff }));
+        ok(allowedSub.result.ok === true && allowedSub.result.hash === sha256Text('draft'), 'LIGHTDRAWER_ALLOWED_DIRS set to a subfolder of home is allowed');
+        ok(allowedSub.lines.length === 0, 'a subfolder of home is not reported as ignored');
+
+        process.env.LIGHTDRAWER_ALLOWED_DIRS = fsRoot;
+        const ignoredRoot = await withStderr(() => stamp({ file: anywhereFile }, { fetchImpl: handoff }));
+        ok(ignoredRoot.result.ok === false && ignoredRoot.result.error === 'That path is not allowed.', 'LIGHTDRAWER_ALLOWED_DIRS set to a filesystem root is ignored');
+        ok(ignoredRoot.lines.length === 1 && ignoredRoot.lines[0] === IGNORED_BROAD_ROOT_MESSAGE && !ignoredRoot.lines[0].includes(anywhereFile), 'ignoring a filesystem root writes one stderr line and does not print the path');
+      } finally {
+        process.chdir(prevCwd);
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevProfile;
+        if (prevStamps === undefined) delete process.env.LIGHTDRAWER_STAMPS_DIR;
+        else process.env.LIGHTDRAWER_STAMPS_DIR = prevStamps;
+        await rm(stubHome, { recursive: true, force: true });
+        await rm(project, { recursive: true, force: true });
+        await rm(anywhereDir, { recursive: true, force: true });
+      }
     } finally {
       if (prevAllowed === undefined) delete process.env.LIGHTDRAWER_ALLOWED_DIRS;
       else process.env.LIGHTDRAWER_ALLOWED_DIRS = prevAllowed;

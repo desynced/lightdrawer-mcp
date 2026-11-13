@@ -101,6 +101,8 @@ When LightDrawer's open stamp lane is available, this completes the stamp and re
 
 A byte-for-byte copy of exactly what was hashed is saved locally only when you turn that on, so you can verify later. Editing the file afterwards changes its fingerprint, and restamping does not prove the old stamp.
 
+If your client starts in your home folder, set LIGHTDRAWER_ALLOWED_DIRS to the folders you want stamped.
+
 Provide exactly one of "file" (a local path) or "text".`;
 
 export const VERIFY_DESCRIPTION = `Verify a LightDrawer receipt ZIP (or an extracted receipt folder) on this machine using LightDrawer's offline verifier. You can pass a "receipt" path, or just a "hash" to look in the local saved-originals folder. If you do not pass the original file or text, this tool will try to find the saved copy automatically and will say whether it was found and matches.
@@ -111,6 +113,8 @@ This does not: upload anything; look up Bitcoin blocks online; upgrade pending p
 
 Receipts made on the LightDrawer website stamp statement.json, not the file itself, so their public fingerprint is different from the file hash where a saved original is stored.
 
+If your client starts in your home folder, set LIGHTDRAWER_ALLOWED_DIRS to the folders you want stamped.
+
 Provide "receipt" or "hash". Optionally provide "file" or "text", but not both.`;
 
 export const LOOKUP_DESCRIPTION = `Look up whether LightDrawer has a public record for a SHA-256 fingerprint. Uses the public lookup API and also returns the page https://lightdrawer.org/r/<hash>.
@@ -118,6 +122,8 @@ export const LOOKUP_DESCRIPTION = `Look up whether LightDrawer has a public reco
 For receipts made on the LightDrawer website, the fingerprint in /r/<hash> is the SHA-256 of statement.json inside the receipt, not the original file's hash. Pass "receipt" to read that fingerprint from a receipt ZIP, or pass "hash" if you already have it. If a local saved copy of the original exists for that hash, the result mentions it.
 
 If you pass "file" or "text", this tool hashes it locally and looks up that hash. That finds stamps of the file or text itself (for example a hash that was stamped directly). It will not find a website-made receipt unless you pass the statement.json hash or the receipt file.
+
+If your client starts in your home folder, set LIGHTDRAWER_ALLOWED_DIRS to the folders you want stamped.
 
 Provide exactly one of "hash", "file", "text", or "receipt".`;
 
@@ -392,7 +398,7 @@ function wrapReceiptValue(value) {
   return value;
 }
 
-function summarizeVerify(result) {
+export function summarizeVerify(result) {
   const sections = (result.sections || []).map((section) => ({
     title: section.title,
     checks: (section.checks || []).map((c) => ({
@@ -405,7 +411,7 @@ function summarizeVerify(result) {
   const times = (result.times || []).map((t) => ({
     source: t.source,
     time: t.time instanceof Date ? t.time.toISOString() : t.time,
-    note: t.note || '',
+    note: t.note ? untrustedText(t.note) : '',
   }));
   const subject = result.statement && result.statement.subject ? result.statement.subject : null;
   return {

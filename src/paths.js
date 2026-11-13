@@ -2,9 +2,10 @@
 // Resolve with realpath before allow/deny so a symlink cannot point at a secret.
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, delimiter, join, resolve, sep } from 'node:path';
+import { basename, delimiter, join, parse, resolve, sep } from 'node:path';
 
 export const PATH_NOT_ALLOWED_MESSAGE = 'That path is not allowed.';
+export const IGNORED_BROAD_ROOT_MESSAGE = 'Ignored a LIGHTDRAWER_ALLOWED_DIRS entry that is the home folder or a filesystem root.';
 export const DEFAULT_MAX_HASH_BYTES = 2147483648;
 export const DEFAULT_MAX_COPY_BYTES = 67108864;
 
@@ -123,17 +124,35 @@ async function existingReal(absPath) {
   }
 }
 
+function isFilesystemRoot(absPath) {
+  return parse(absPath).root === absPath;
+}
+
+function isBroadRoot(realPath, homeReal) {
+  if (isFilesystemRoot(realPath)) return true;
+  return !!(homeReal && pathKey(realPath) === pathKey(homeReal));
+}
+
 async function allowedRoots() {
   const roots = [];
+  const home = await homeDir();
+  // A client that starts in the home folder or at a disk root must not
+  // inherit that directory as an allowed root. Callers name narrower
+  // folders with LIGHTDRAWER_ALLOWED_DIRS. The stamps folder is separate.
   const cwd = await existingReal(resolve(process.cwd()));
-  if (cwd) roots.push(cwd);
+  if (cwd && !isBroadRoot(cwd, home)) roots.push(cwd);
   const raw = process.env.LIGHTDRAWER_ALLOWED_DIRS;
   if (raw != null && String(raw).trim()) {
     for (const part of String(raw).split(delimiter)) {
       const entry = part.trim();
       if (!entry) continue;
       const real = await existingReal(resolve(entry));
-      if (real) roots.push(real);
+      if (!real) continue;
+      if (isBroadRoot(real, home)) {
+        process.stderr.write(IGNORED_BROAD_ROOT_MESSAGE + '\n');
+        continue;
+      }
+      roots.push(real);
     }
   }
   const stamps = await existingReal(resolve(configuredStampsDir()));
