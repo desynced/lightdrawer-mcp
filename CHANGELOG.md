@@ -2,10 +2,20 @@
 
 Every change to this MCP server that affects what it does or how it is set up is listed here, newest first.
 
-## [Unreleased]
+## [0.3.0] - 2026-11-12
+
+### Security
+- Stamp, verify, and lookup resolve a path, including symlinks, before they decide whether to read it. A path is allowed only under the current working directory, `LIGHTDRAWER_ALLOWED_DIRS`, or the stamps folder. Secret locations and names such as `~/.ssh`, `.env`, and private keys are refused. The target of a refused symlink is not shown.
+- Hash reads stop at `LIGHTDRAWER_MAX_HASH_BYTES` (default 2 GiB). Saved copies stop at `LIGHTDRAWER_MAX_COPY_BYTES` (default 64 MiB). A file over the limit is refused before the hash or the copy starts.
+- Saving a local copy is off unless `LIGHTDRAWER_SAVE_ORIGINALS` is set to `1`, `true`, `on`, or `yes`.
+- Text taken from a receipt (the subject, notes, filenames, and check details) is marked untrusted and cut to 200 characters so it is not treated as instructions.
+- A failed stamp returns a generic error and the HTTP status. Raw upstream error text is not repeated.
+- Added `SECURITY.md`. Dependabot checks npm updates weekly on `main`.
 
 ### Changed
-- Docs now say the open lane currently has no hourly or daily cap. The operator can add limits or switch the lane off at any time; if that happens, the tool falls back to the browser.
+- The open stamp lane is described without claiming that any cap is on or off. The lane may rate-limit or be switched off, and the tool then falls back to a browser link.
+- `@modelcontextprotocol/sdk` is pinned to exact version 1.32.2.
+- Install instructions use the pinned tag `v0.3.0`.
 
 ## [0.2.0] - 2026-11-10
 
